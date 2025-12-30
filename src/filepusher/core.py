@@ -239,7 +239,7 @@ def load_settings():
 
 def build_ui():
     root = tk.Tk()
-    root.title("File Sorting Hat")
+    root.title("File Pusher")
     root.geometry("700x780")
     widgets["root"] = root
 
