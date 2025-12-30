@@ -7,3 +7,9 @@ A small, GUI-based file sorting utility written in Python using Tkinter.
 ```bash
 pip install -e .
 ```
+
+## Screenshot
+
+<p align="center">
+![Filemover main window](images/screenshot.png)
+</p>
