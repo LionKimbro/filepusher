@@ -11,5 +11,5 @@ pip install -e .
 ## Screenshot
 
 <p align="center">
-![Filemover main window](images/screenshot.png)
+  <img src="images/screenshot.png" width="700">
 </p>
