@@ -1,0 +1,5 @@
+pycache/
+*.pyc
+.sorter_config.json
+sorter_config.json
+src/filepusher.egg-info/
