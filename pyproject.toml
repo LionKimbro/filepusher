@@ -1,0 +1,12 @@
+[project]
+name = "filepusher"
+version = "0.1.0"
+description = "A small Tkinter-based file sorting utility"
+requires-python = ">=3.9"
+
+[project.scripts]
+filepusher = "filepusher.core:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
