@@ -1,13 +1,13 @@
 # filepusher/core.py
 
-import os
-import shutil
-import json
+from pathlib import Path
 import datetime
+import json
 import random
 import string
-import subprocess
 import platform
+import subprocess
+import shutil
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 
@@ -15,9 +15,11 @@ from tkinter import filedialog, messagebox, scrolledtext
 # CONSTANTS
 # ============================================================
 
-kCONFIG_FILE = "sorter_config.json"
-kPOLL_MS = 2000
+CONFIG_FILE = Path("sorter_config.json")
+POLL_MS = 2000
 
+TRANSFER_COPY = "copy"
+TRANSFER_MOVE = "move"
 
 # ============================================================
 # GLOBAL STATE (INTENTIONAL)
@@ -25,12 +27,16 @@ kPOLL_MS = 2000
 
 g = {
     "monitoring": False,
-    "ignore_sets": {},     # path -> set(filenames)
+    "transfer_mode": TRANSFER_COPY,
+    "active_category": 0,
+    "fatal_error": False,
+    "last_error": "",
+    "current_path": None,          # Path | None
 }
 
 widgets = {}
-rows = []                 # [{count, name}]
-
+rows = []
+ignore_sets = {}                  # Path -> set[str]
 
 # ============================================================
 # LOGGING
@@ -44,9 +50,8 @@ def log(msg):
     w.see(tk.END)
     w.config(state="disabled")
 
-
 # ============================================================
-# FILESYSTEM HELPERS
+# UI HELPERS
 # ============================================================
 
 def browse_folder(var):
@@ -54,61 +59,90 @@ def browse_folder(var):
     if p:
         var.set(p)
 
-
-def open_folder(path):
-    if not path or not os.path.isdir(path):
+def open_folder(path_text):
+    p = Path(path_text) if path_text else None
+    if not p or not p.is_dir():
         messagebox.showerror("Error", "Invalid folder path.")
         return
-
     try:
         if platform.system() == "Windows":
-            os.startfile(path)
+            import os
+            os.startfile(str(p))
         elif platform.system() == "Darwin":
-            subprocess.call(["open", path])
+            subprocess.call(["open", str(p)])
         else:
-            subprocess.call(["xdg-open", path])
+            subprocess.call(["xdg-open", str(p)])
     except Exception as e:
         log(f"Could not open folder: {e}")
 
+def ui_set_idle():
+    widgets["toggle"].config(text="START MONITORING", bg="#d9d9d9", fg="black")
+    widgets["tar"].config(state="normal")
+    widgets["doit"].config(state="normal")
+
+def ui_set_monitoring():
+    widgets["toggle"].config(text="STOP MONITORING", bg="#ffcccc", fg="red")
+    widgets["tar"].config(state="disabled")
+    widgets["doit"].config(state="disabled")
+
+def sync_from_ui():
+    g["active_category"] = widgets["radio_category"].get()
+    g["transfer_mode"] = widgets["radio_mode"].get()
+
+# ============================================================
+# FAILURE RULE
+# ============================================================
+
+def transfer_failure(reason):
+    g["fatal_error"] = True
+    g["monitoring"] = False
+    g["last_error"] = reason
+    ui_set_idle()
+    log(f"FATAL: {reason}")
+    messagebox.showerror("File Pusher – Fatal Error", reason)
+
+# ============================================================
+# TAR / DO IT
+# ============================================================
+
+def do_tar():
+    ignore_sets.clear()
+    for v in widgets["sources"]:
+        p = Path(v.get())
+        if p.is_dir():
+            ignore_sets[p] = {x.name for x in p.iterdir() if x.is_file()}
+            log(f"TAR: '{p.name}' ({len(ignore_sets[p])} files ignored)")
+
+def do_it():
+    if g["fatal_error"]:
+        return
+    scan_and_push()
 
 # ============================================================
 # MONITOR CONTROL
 # ============================================================
 
-def handle_when_user_clicks_toggle_monitoring():
+def handle_toggle_monitoring():
     if g["monitoring"]:
         g["monitoring"] = False
-        widgets["toggle"].config(text="START MONITORING", bg="#d9d9d9", fg="black")
+        ui_set_idle()
         log("Monitoring STOPPED.")
         return
 
-    dest = widgets["dest"].get()
-    if not os.path.isdir(dest):
+    dest = Path(widgets["dest"].get())
+    if not dest.is_dir():
         messagebox.showerror("Error", "Destination folder is invalid.")
         return
 
-    g["ignore_sets"] = {}
-    valid = False
+    sync_from_ui()
+    g["fatal_error"] = False
+    g["last_error"] = ""
 
-    for v in widgets["sources"]:
-        p = v.get()
-        if os.path.isdir(p):
-            valid = True
-            try:
-                files = set(os.listdir(p))
-                g["ignore_sets"][p] = files
-                log(f"Watching '{os.path.basename(p)}' (Ignoring {len(files)} existing files)")
-            except Exception as e:
-                log(f"Error reading {p}: {e}")
-
-    if not valid:
-        messagebox.showerror("Error", "Please set at least one valid source folder.")
-        return
+    do_tar()
 
     g["monitoring"] = True
-    widgets["toggle"].config(text="STOP MONITORING", bg="#ffcccc", fg="red")
-    log("Monitoring STARTED.")
-
+    ui_set_monitoring()
+    log(f"Monitoring STARTED. Mode={g['transfer_mode'].upper()}")
 
 # ============================================================
 # CORE LOOP
@@ -116,69 +150,114 @@ def handle_when_user_clicks_toggle_monitoring():
 
 def poll_loop():
     if g["monitoring"]:
-        scan_and_push()
-    widgets["root"].after(kPOLL_MS, poll_loop)
-
+        do_it()
+    widgets["root"].after(POLL_MS, poll_loop)
 
 def scan_and_push():
-    dest = widgets["dest"].get()
-    exts = [e.lower() for e in widgets["exts"].get().split() if e]
-    idx = widgets["radio"].get()
-    name = rows[idx]["name"].get()
+    sync_from_ui()
 
-    if not name:
+    dest = Path(widgets["dest"].get())
+    idx = g["active_category"]
+    if idx < 0 or idx >= len(rows):
         return
 
-    for p in g["ignore_sets"]:
-        try:
-            for fn in os.listdir(p):
-                if fn in g["ignore_sets"][p]:
-                    continue
-                if fn.startswith("."):
-                    continue
+    tag = rows[idx]["name"].get().strip()
+    if not tag:
+        return
 
-                src = os.path.join(p, fn)
-                if not os.path.isfile(src):
-                    continue
+    ext_text = widgets["exts"].get().strip()
+    use_all_exts = (ext_text == "*")
+    exts = {e.lower().lstrip(".") for e in ext_text.split()} if not use_all_exts else None
 
-                ext = os.path.splitext(fn)[1].lower().lstrip(".")
+    for src_dir in list(ignore_sets.keys()):
+        for path in src_dir.iterdir():
+            if path.name in ignore_sets[src_dir]:
+                continue
+            if not path.is_file():
+                continue
+            if not use_all_exts:
+                ext = path.suffix.lower().lstrip(".")
                 if ext not in exts:
                     continue
 
-                push_file(src, fn, ext, dest, idx, name)
+            g["current_path"] = path
+            push_current_file(dest, tag)
 
-        except Exception as e:
-            log(f"Error scanning {p}: {e}")
+            if g["fatal_error"]:
+                return
 
+# ============================================================
+# FILE NAMING
+# ============================================================
 
-def push_file(src, fn, ext, dest, idx, tag):
-    cnt = rows[idx]["count"].get() + 1
+def make_output_filename(tag):
+    path = g["current_path"]
+    tmpl = widgets["template"].get().strip()
+
+    if not tmpl:
+        return path.name
+
+    cnt = rows[g["active_category"]]["count"].get() + 1
     today = datetime.date.today().strftime("%Y-%m-%d")
 
-    tmpl = widgets["template"].get()
-    base = tmpl.replace("YMD", today).replace("NAME", tag).replace("NUM", str(cnt))
-    out = f"{base}.{ext}"
-    dst = os.path.join(dest, out)
+    base = (
+        tmpl.replace("YMD", today)
+            .replace("NAME", tag)
+            .replace("NUM", str(cnt))
+    )
+    return base + path.suffix
 
-    if os.path.exists(dst):
-        for _ in range(10):
-            r = "".join(random.choices(string.ascii_letters + string.digits, k=4))
-            alt = f"{r}_{out}"
-            dst = os.path.join(dest, alt)
-            if not os.path.exists(dst):
-                out = alt
-                break
-        else:
-            log(f"FAILED to push {fn}: name collision.")
-            return
+def resolve_collision(dest, name):
+    candidate = dest / name
+    if not candidate.exists():
+        return candidate
+    for _ in range(10):
+        r = "".join(random.choices(string.ascii_letters + string.digits, k=4))
+        alt = dest / f"{r}_{name}"
+        if not alt.exists():
+            return alt
+    transfer_failure(f"Name collision: {name}")
+    return None
+
+# ============================================================
+# TRANSFER PROCEDURE
+# ============================================================
+
+def push_current_file(dest, tag):
+    src = g["current_path"]
+    out_name = make_output_filename(tag)
+    dst = resolve_collision(dest, out_name)
+    if not dst:
+        return
 
     try:
-        shutil.push(src, dst)
-        rows[idx]["count"].set(cnt)
-        log(f"Pushd: {fn} -> {out}")
+        shutil.copy2(src, dst)
     except Exception as e:
-        log(f"Error moving file: {e}")
+        transfer_failure(f"Copy failed: {e}")
+        return
 
+    try:
+        if src.stat().st_size != dst.stat().st_size:
+            transfer_failure("Byte-count mismatch after copy.")
+            return
+    except Exception as e:
+        transfer_failure(f"Stat failed: {e}")
+        return
+
+    if g["transfer_mode"] == TRANSFER_MOVE:
+        try:
+            src.unlink()
+        except Exception as e:
+            transfer_failure(f"Delete failed: {e}")
+            return
+
+    rows[g["active_category"]]["count"].set(
+        rows[g["active_category"]]["count"].get() + 1
+    )
+    ignore_sets[src.parent].add(src.name)
+
+    log(f"Pushed: {src.name} → {dst.name}")
+    g["current_path"] = None
 
 # ============================================================
 # SETTINGS
@@ -190,85 +269,71 @@ def save_settings():
         "dest": widgets["dest"].get(),
         "exts": widgets["exts"].get(),
         "template": widgets["template"].get(),
-        "radio": widgets["radio"].get(),
-        "rows": [
-            {"count": r["count"].get(), "name": r["name"].get()}
-            for r in rows
-        ],
+        "active_category": widgets["radio_category"].get(),
+        "transfer_mode": widgets["radio_mode"].get(),
+        "rows": [{"count": r["count"].get(), "name": r["name"].get()} for r in rows],
     }
-
-    try:
-        with open(kCONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        log("Settings saved.")
-    except Exception as e:
-        log(f"Error saving settings: {e}")
-
+    CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    log("Settings saved.")
 
 def load_settings():
-    if not os.path.exists(kCONFIG_FILE):
+    if not CONFIG_FILE.exists():
         return
+    d = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
 
-    try:
-        with open(kCONFIG_FILE, "r", encoding="utf-8") as f:
-            d = json.load(f)
+    for i, p in enumerate(d.get("sources", [])):
+        if i < len(widgets["sources"]):
+            widgets["sources"][i].set(p)
 
-        for i, p in enumerate(d.get("sources", [])):
-            if i < 3:
-                widgets["sources"][i].set(p)
+    widgets["dest"].set(d.get("dest", ""))
+    widgets["exts"].set(d.get("exts", ""))
+    widgets["template"].set(d.get("template", "YMD_NAME_NUM"))
+    widgets["radio_category"].set(d.get("active_category", 0))
+    widgets["radio_mode"].set(d.get("transfer_mode", TRANSFER_COPY))
 
-        widgets["dest"].set(d.get("dest", ""))
-        widgets["exts"].set(d.get("exts", ""))
-        widgets["template"].set(d.get("template", ""))
-        widgets["radio"].set(d.get("radio", 0))
+    for i, r in enumerate(d.get("rows", [])):
+        if i < len(rows):
+            rows[i]["count"].set(r.get("count", 0))
+            rows[i]["name"].set(r.get("name", ""))
 
-        for i, r in enumerate(d.get("rows", [])):
-            if i < 5:
-                rows[i]["count"].set(r.get("count", 0))
-                rows[i]["name"].set(r.get("name", ""))
-
-        log("Settings loaded.")
-
-    except Exception as e:
-        log(f"Error loading settings: {e}")
-
+    log("Settings loaded.")
 
 # ============================================================
-# UI CONSTRUCTION
+# UI
 # ============================================================
 
 def build_ui():
     root = tk.Tk()
     root.title("File Pusher")
-    root.geometry("700x780")
+    root.geometry("700x820")
     widgets["root"] = root
 
-    widgets["radio"] = tk.IntVar(value=0)
+    widgets["radio_category"] = tk.IntVar(value=0)
+    widgets["radio_mode"] = tk.StringVar(value=TRANSFER_COPY)
+
     widgets["sources"] = [tk.StringVar() for _ in range(3)]
     widgets["dest"] = tk.StringVar()
     widgets["exts"] = tk.StringVar(value="png jpg jpeg webp")
     widgets["template"] = tk.StringVar(value="YMD_NAME_NUM")
 
-    # --- categories ---
+    # Categories
     top = tk.LabelFrame(root, text="Active Sorting Categories", padx=10, pady=10)
     top.pack(fill="x", padx=10, pady=5)
 
     tk.Label(top, text="Count").grid(row=0, column=0)
     tk.Label(top, text="Select").grid(row=0, column=1)
-    tk.Label(top, text="Category Name").grid(row=0, column=2, sticky="w")
+    tk.Label(top, text="Category Name").grid(row=0, column=2)
 
     for i in range(5):
         c = tk.IntVar(value=0)
         n = tk.StringVar()
         rows.append({"count": c, "name": n})
 
-        tk.Entry(top, textvariable=c, width=5, justify="center").grid(row=i+1, column=0)
-        tk.Radiobutton(top, variable=widgets["radio"], value=i).grid(row=i+1, column=1)
-        e = tk.Entry(top, textvariable=n, width=40)
-        e.grid(row=i+1, column=2)
-        e.bind("<FocusIn>", lambda _, j=i: widgets["radio"].set(j))
+        tk.Entry(top, textvariable=c, width=5).grid(row=i+1, column=0)
+        tk.Radiobutton(top, variable=widgets["radio_category"], value=i).grid(row=i+1, column=1)
+        tk.Entry(top, textvariable=n, width=40).grid(row=i+1, column=2)
 
-    # --- config ---
+    # Configuration
     cfg = tk.LabelFrame(root, text="Configuration", padx=10, pady=10)
     cfg.pack(fill="x", padx=10, pady=5)
 
@@ -278,7 +343,13 @@ def build_ui():
     tk.Label(cfg, text="Extensions to push:").grid(row=1, column=0, sticky="e")
     tk.Entry(cfg, textvariable=widgets["exts"], width=50).grid(row=1, column=1)
 
-    # --- sources ---
+    tk.Label(cfg, text="Transfer mode:").grid(row=2, column=0, sticky="e")
+    mode = tk.Frame(cfg)
+    mode.grid(row=2, column=1, sticky="w")
+    tk.Radiobutton(mode, text="Copy", variable=widgets["radio_mode"], value=TRANSFER_COPY).pack(side="left")
+    tk.Radiobutton(mode, text="Move", variable=widgets["radio_mode"], value=TRANSFER_MOVE).pack(side="left")
+
+    # Sources
     srcs = tk.LabelFrame(root, text="Source Folders", padx=10, pady=10)
     srcs.pack(fill="x", padx=10, pady=5)
 
@@ -288,38 +359,40 @@ def build_ui():
         tk.Button(srcs, text="Find", command=lambda j=i: browse_folder(widgets["sources"][j])).grid(row=i, column=2)
         tk.Button(srcs, text="Open", command=lambda j=i: open_folder(widgets["sources"][j].get())).grid(row=i, column=3)
 
-    # --- controls ---
+    # Controls
     ctl = tk.LabelFrame(root, text="Controls & Destination", padx=10, pady=10)
     ctl.pack(fill="x", padx=10, pady=5)
 
     widgets["toggle"] = tk.Button(
         ctl, text="START MONITORING", width=20, height=2,
-        command=handle_when_user_clicks_toggle_monitoring
+        command=handle_toggle_monitoring
     )
-    widgets["toggle"].grid(row=0, column=0, rowspan=2, padx=10)
+    widgets["toggle"].grid(row=0, column=0, columnspan=2, rowspan=2, padx=10, sticky="nsew")
 
-    tk.Label(ctl, text="Relocate files to:").grid(row=0, column=1, sticky="e")
-    tk.Entry(ctl, textvariable=widgets["dest"], width=40).grid(row=0, column=2)
-    tk.Button(ctl, text="Find", command=lambda: browse_folder(widgets["dest"])).grid(row=0, column=3)
-    tk.Button(ctl, text="Open", command=lambda: open_folder(widgets["dest"].get())).grid(row=0, column=4)
+    widgets["tar"] = tk.Button(ctl, text="TAR", width=10, command=do_tar)
+    widgets["tar"].grid(row=2, column=0, sticky="w", padx=10)
 
-    tk.Button(ctl, text="Save Settings", command=save_settings).grid(row=1, column=2, sticky="w")
-    tk.Button(ctl, text="Load Settings", command=load_settings).grid(row=1, column=2, sticky="e")
+    widgets["doit"] = tk.Button(ctl, text="DO IT", width=10, command=do_it)
+    widgets["doit"].grid(row=2, column=1, sticky="e", padx=10)
 
-    widgets["log"] = scrolledtext.ScrolledText(root, height=8, state="disabled", font=("Consolas", 9))
+    tk.Label(ctl, text="Relocate files to:").grid(row=0, column=2, sticky="e")
+    tk.Entry(ctl, textvariable=widgets["dest"], width=40).grid(row=0, column=3)
+    tk.Button(ctl, text="Find", command=lambda: browse_folder(widgets["dest"])).grid(row=0, column=4)
+    tk.Button(ctl, text="Open", command=lambda: open_folder(widgets["dest"].get())).grid(row=0, column=5)
+
+    subframe = tk.Frame(ctl)
+    subframe.grid(row=2, column=2, columnspan=4, sticky="we")
+    tk.Button(subframe, text="Save Settings", command=save_settings).grid(row=0, column=0, sticky="w")
+    tk.Button(subframe, text="Load Settings", command=load_settings).grid(row=0, column=1, sticky="w")
+
+    widgets["log"] = scrolledtext.ScrolledText(root, height=10, state="disabled")
     widgets["log"].pack(fill="both", expand=True, padx=10, pady=5)
 
-    root.protocol("WM_DELETE_WINDOW", handle_when_application_closes)
-
+    root.protocol("WM_DELETE_WINDOW", lambda: (save_settings(), root.destroy()))
 
 # ============================================================
-# LIFECYCLE
+# ENTRY
 # ============================================================
-
-def handle_when_application_closes():
-    save_settings()
-    widgets["root"].destroy()
-
 
 def main():
     build_ui()

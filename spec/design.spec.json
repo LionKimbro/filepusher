@@ -1,0 +1,337 @@
+{
+  "machine": {
+    "name": "File Pusher",
+    "type": "single-instance, single-threaded, UI-driven file-monitoring machine",
+    "purpose": "Observe source folders, detect newly appearing files, and transfer them to a destination folder using user-selected categories, naming rules, and transfer mode.",
+    "design_principles": [
+      "Single running machine",
+      "No reentrancy",
+      "No background threads",
+      "Globals and locals only",
+      "No parameters unless explicitly approved",
+      "UI is the control surface, not mere input",
+      "Filesystem is the ground truth"
+    ]
+  },
+  "lifecycle": {
+    "startup": [
+      "Build UI",
+      "Load saved settings",
+      "Arm poll loop",
+      "Enter idle state"
+    ],
+    "shutdown": [
+      "Save settings",
+      "Destroy UI",
+      "Exit process"
+    ]
+  },
+  "states": {
+    "IDLE": {
+      "description": "Monitoring is off. No filesystem scanning occurs.",
+      "allowed_actions": [
+        "Edit configuration",
+        "Select categories",
+        "Change transfer mode",
+        "Start monitoring"
+      ]
+    },
+    "MONITORING": {
+      "description": "Monitoring is active. Source folders are periodically scanned.",
+      "allowed_actions": [
+        "Stop monitoring",
+        "Observe logs"
+      ]
+    }
+  },
+  "state_transitions": {
+    "start_monitoring": {
+      "from": "IDLE",
+      "to": "MONITORING",
+      "preconditions": [
+        "Destination folder is valid",
+        "At least one source folder is valid"
+      ],
+      "effects": [
+        "Initialize ignore sets from current directory contents",
+        "Set monitoring state to true",
+        "Log monitoring start"
+      ]
+    },
+    "stop_monitoring": {
+      "from": "MONITORING",
+      "to": "IDLE",
+      "effects": [
+        "Set monitoring state to false",
+        "Update UI to reflect idle state",
+        "Log monitoring stop"
+      ]
+    },
+    "fatal_error": {
+      "from": "MONITORING",
+      "to": "IDLE",
+      "cause": "Filesystem trust violation",
+      "effects": [
+        "Disable monitoring",
+        "Preserve error information",
+        "Require operator intervention"
+      ]
+    }
+  },
+  "poll_loop": {
+    "description": "Heartbeat of the machine. Executes periodically.",
+    "behavior": [
+      "If monitoring is false, do nothing",
+      "If monitoring is true, perform a scan cycle",
+      "Reschedule itself unconditionally"
+    ],
+    "constraints": [
+      "Never overlaps",
+      "Never blocks UI",
+      "Never runs concurrently"
+    ]
+  },
+  "scan_cycle": {
+    "inputs": [
+      "Configured source folders",
+      "Destination folder",
+      "Extension filter",
+      "Active category",
+      "Transfer mode"
+    ],
+    "steps": [
+      "Determine current machine configuration from globals and UI",
+      "Iterate over source folders",
+      "List directory contents",
+      "Ignore already-seen files",
+      "Ignore hidden files",
+      "Ignore non-regular files",
+      "Filter by extension",
+      "For each eligible file, attempt transfer"
+    ]
+  },
+  "file_naming": {
+    "description": "Determines output filename for transferred files.",
+    "rules": [
+      "If naming template is provided, generate filename using date, category name, and counter",
+      "If no template is provided, use original filename",
+      "Resolve name collisions deterministically with suffixes",
+      "Do not overwrite existing files"
+    ]
+  },
+  "transfer_procedure": {
+    "description": "Three-step guarded file transfer transaction.",
+    "steps": [
+      {
+        "step": 1,
+        "action": "Copy source file to destination",
+        "on_failure": "Trigger transfer_failure_rule"
+      },
+      {
+        "step": 2,
+        "action": "Verify source and destination byte counts match",
+        "on_failure": "Trigger transfer_failure_rule"
+      },
+      {
+        "step": 3,
+        "action": "Delete source file if transfer_mode is move",
+        "on_failure": "Trigger transfer_failure_rule"
+      }
+    ],
+    "on_success": [
+      "Increment category counter",
+      "Update ignore sets if applicable",
+      "Log successful transfer"
+    ]
+  },
+  "logging": {
+    "philosophy": "Logs narrate machine decisions and state transitions.",
+    "logs_include": [
+      "Monitoring start and stop",
+      "Files transferred",
+      "Files skipped and why",
+      "Errors and trust violations"
+    ],
+    "constraints": [
+      "Logging must not affect machine correctness",
+      "Logs must be human-readable"
+    ]
+  },
+  "ui_semantics": {
+    "role": "Control panel for configuring and observing the machine.",
+    "principles": [
+      "Changing UI values configures future behavior, not immediate actions",
+      "UI state is authoritative",
+      "UI reflects machine state changes explicitly"
+    ],
+    "controls": [
+      "Source folder selectors",
+      "Destination folder selector",
+      "Extension filter",
+      "Naming template",
+      "Category selection radio buttons",
+      "Transfer mode radio buttons (copy / move)",
+      "Start / Stop monitoring button"
+    ]
+  },
+  "variables": {
+    "globals": {
+      "g-vars": {
+        "g[\"monitoring\"]": {
+          "type": "bool",
+          "scope": "scalar global (g)",
+          "purpose": "Indicates whether the machine is actively scanning source folders.",
+          "owned_by": [
+            "lifecycle",
+            "error handling"
+          ],
+          "invariants": [
+            "If false, no filesystem actions occur."
+          ]
+        },
+        "g[\"transfer_mode\"]": {
+          "type": "string",
+          "allowed_values": [
+            "copy",
+            "move"
+          ],
+          "scope": "scalar global (g)",
+          "purpose": "Determines whether files are copied only or copied then deleted from source.",
+          "owned_by": [
+            "UI radio buttons"
+          ],
+          "read_by": [
+            "transfer procedure"
+          ]
+        },
+        "g[\"active_category\"]": {
+          "type": "int",
+          "scope": "scalar global (g)",
+          "purpose": "Index of the currently selected category row.",
+          "owned_by": [
+            "UI radio group"
+          ],
+          "read_by": [
+            "scan logic",
+            "transfer logic"
+          ]
+        },
+        "g[\"fatal_error\"]": {
+          "type": "bool",
+          "scope": "scalar global (g)",
+          "purpose": "Indicates that a trust-violating filesystem error has occurred.",
+          "owned_by": [
+            "transfer procedure"
+          ],
+          "meaning": "The filesystem has violated expectations; the machine must halt.",
+          "effects": [
+            "Monitoring is turned off",
+            "Operator intervention is required"
+          ]
+        },
+        "g[\"last_error\"]": {
+          "type": "string",
+          "scope": "scalar global (g)",
+          "purpose": "Stores a human-readable explanation of the most recent fatal error.",
+          "owned_by": [
+            "transfer procedure"
+          ],
+          "read_by": [
+            "logging",
+            "UI messaging"
+          ],
+          "default": ""
+        }
+      },
+      "widgets": {
+        "type": "dict",
+        "scope": "structural global",
+        "purpose": "Holds all Tkinter widgets and Tkinter variable objects.",
+        "contents": [
+          "root window",
+          "buttons",
+          "entry widgets",
+          "StringVar instances",
+          "IntVar instances",
+          "log text widget",
+          "radio button variables"
+        ],
+        "rules": [
+          "Widgets are never passed as parameters",
+          "Widgets may be read or written anywhere"
+        ]
+      },
+      "rows": {
+        "type": "list",
+        "scope": "structural global",
+        "purpose": "Defines category rows with semantic labels and persistent counters.",
+        "element_structure": {
+          "count": "Tk IntVar",
+          "name": "Tk StringVar"
+        },
+        "invariants": [
+          "Counts increment only after successful transfer completion"
+        ]
+      },
+      "ignore_sets": {
+        "type": "dict",
+        "scope": "structural global",
+        "purpose": "Tracks baseline and already-seen filenames per source folder.",
+        "mapping": "source_folder_path -> set of filenames",
+        "lifecycle": [
+          "Cleared and rebuilt when monitoring starts",
+          "Updated after successful COPY transfers",
+          "Naturally shrinks under MOVE semantics"
+        ]
+      }
+    },
+    "constants": {
+      "type": "read-only globals",
+      "scope": "structural constants",
+      "purpose": "Provide fixed configuration values.",
+      "examples": [
+        "configuration filename",
+        "poll interval",
+        "UI geometry defaults"
+      ],
+      "rules": [
+        "Never modified at runtime",
+        "Not stored in g"
+      ]
+    },
+    "local_only_state": {
+      "type": "local variables",
+      "scope": "function-local only",
+      "purpose": "Ephemeral data used during a single scan or transfer operation.",
+      "must_not_be_global": [
+        "temporary filenames",
+        "byte counts",
+        "exception objects",
+        "per-scan loop variables",
+        "in-flight source paths",
+        "in-flight destination paths"
+      ]
+    }
+  },
+  "transfer_failure_rule": {
+    "type": "behavioral invariant",
+    "scope": "global rule",
+    "trigger_conditions": [
+      "copy failure",
+      "byte-count mismatch",
+      "delete failure in move mode"
+    ],
+    "required_actions": [
+      "set g.fatal_error = true",
+      "set g.monitoring = false",
+      "set g.last_error with precise message",
+      "update START/STOP UI to idle state",
+      "log the error clearly"
+    ],
+    "prohibitions": [
+      "No retries",
+      "No continued monitoring",
+      "No silent degradation"
+    ]
+  }
+}
