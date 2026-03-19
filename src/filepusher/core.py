@@ -388,6 +388,9 @@ def build_ui():
     widgets["log"] = scrolledtext.ScrolledText(root, height=10, state="disabled")
     widgets["log"].pack(fill="both", expand=True, padx=10, pady=5)
 
+    widgets["notes"] = tk.Text(root, height=4)
+    widgets["notes"].pack(fill="x", padx=10, pady=5)
+
     root.protocol("WM_DELETE_WINDOW", lambda: (save_settings(), root.destroy()))
 
 # ============================================================
