@@ -8,6 +8,7 @@ import string
 import platform
 import subprocess
 import shutil
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 
@@ -32,6 +33,8 @@ g = {
     "fatal_error": False,
     "last_error": "",
     "current_path": None,          # Path | None
+    "time_limit_minutes": 15,      # int | None; None means disabled
+    "monitor_stop_at": None,       # float epoch seconds | None
 }
 
 widgets = {}
@@ -79,15 +82,47 @@ def ui_set_idle():
     widgets["toggle"].config(text="START MONITORING", bg="#d9d9d9", fg="black")
     widgets["tar"].config(state="normal")
     widgets["doit"].config(state="normal")
+    update_countdown_ui()
 
 def ui_set_monitoring():
     widgets["toggle"].config(text="STOP MONITORING", bg="#ffcccc", fg="red")
     widgets["tar"].config(state="disabled")
     widgets["doit"].config(state="disabled")
+    update_countdown_ui()
 
 def sync_from_ui():
     g["active_category"] = widgets["radio_category"].get()
     g["transfer_mode"] = widgets["radio_mode"].get()
+
+def format_hhmmss(total_seconds):
+    h, rem = divmod(total_seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+def update_countdown_ui():
+    frame = widgets.get("time_limit_countdown_frame")
+    if not frame:
+        return
+
+    show = (
+        g["monitoring"]
+        and g["time_limit_minutes"] is not None
+        and g["monitor_stop_at"] is not None
+    )
+    if not show:
+        frame.pack_forget()
+        return
+
+    remaining = max(0, int(g["monitor_stop_at"] - time.time()))
+    widgets["time_limit_countdown_value"].config(text=format_hhmmss(remaining))
+    if not frame.winfo_ismapped():
+        frame.pack(side="left")
+
+def stop_monitoring(log_message):
+    g["monitoring"] = False
+    g["monitor_stop_at"] = None
+    ui_set_idle()
+    log(log_message)
 
 # ============================================================
 # FAILURE RULE
@@ -96,10 +131,11 @@ def sync_from_ui():
 def transfer_failure(reason):
     g["fatal_error"] = True
     g["monitoring"] = False
+    g["monitor_stop_at"] = None
     g["last_error"] = reason
     ui_set_idle()
     log(f"FATAL: {reason}")
-    messagebox.showerror("File Pusher – Fatal Error", reason)
+    messagebox.showerror("File Pusher - Fatal Error", reason)
 
 # ============================================================
 # TAR / DO IT
@@ -122,11 +158,38 @@ def do_it():
 # MONITOR CONTROL
 # ============================================================
 
+def handle_set_time_limit():
+    raw = widgets["time_limit"].get().strip()
+    try:
+        minutes = int(raw)
+    except ValueError:
+        messagebox.showerror("Error", "Time limit must be a whole number of minutes.")
+        return False
+
+    if minutes < 0:
+        messagebox.showerror("Error", "Time limit cannot be negative.")
+        return False
+
+    if minutes == 0:
+        g["time_limit_minutes"] = None
+        g["monitor_stop_at"] = None
+        log("Time limit cleared.")
+        update_countdown_ui()
+        return True
+
+    g["time_limit_minutes"] = minutes
+    if g["monitoring"]:
+        g["monitor_stop_at"] = time.time() + (minutes * 60)
+    log(f"Time limit set to {minutes} minute(s).")
+    update_countdown_ui()
+    return True
+
 def handle_toggle_monitoring():
     if g["monitoring"]:
-        g["monitoring"] = False
-        ui_set_idle()
-        log("Monitoring STOPPED.")
+        stop_monitoring("Monitoring STOPPED.")
+        return
+
+    if not handle_set_time_limit():
         return
 
     dest = Path(widgets["dest"].get())
@@ -141,6 +204,10 @@ def handle_toggle_monitoring():
     do_tar()
 
     g["monitoring"] = True
+    if g["time_limit_minutes"] is None:
+        g["monitor_stop_at"] = None
+    else:
+        g["monitor_stop_at"] = time.time() + (g["time_limit_minutes"] * 60)
     ui_set_monitoring()
     log(f"Monitoring STARTED. Mode={g['transfer_mode'].upper()}")
 
@@ -152,6 +219,16 @@ def poll_loop():
     if g["monitoring"]:
         do_it()
     widgets["root"].after(POLL_MS, poll_loop)
+
+def countdown_loop():
+    if g["monitoring"] and g["time_limit_minutes"] is not None and g["monitor_stop_at"] is not None:
+        if time.time() >= g["monitor_stop_at"]:
+            stop_monitoring("Monitoring STOPPED (time limit reached).")
+        else:
+            update_countdown_ui()
+    else:
+        update_countdown_ui()
+    widgets["root"].after(500, countdown_loop)
 
 def scan_and_push():
     sync_from_ui()
@@ -271,6 +348,7 @@ def save_settings():
         "template": widgets["template"].get(),
         "active_category": widgets["radio_category"].get(),
         "transfer_mode": widgets["radio_mode"].get(),
+        "time_limit_minutes": 0 if g["time_limit_minutes"] is None else g["time_limit_minutes"],
         "rows": [{"count": r["count"].get(), "name": r["name"].get()} for r in rows],
     }
     CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -290,6 +368,20 @@ def load_settings():
     widgets["template"].set(d.get("template", "YMD_NAME_NUM"))
     widgets["radio_category"].set(d.get("active_category", 0))
     widgets["radio_mode"].set(d.get("transfer_mode", TRANSFER_COPY))
+
+    raw_minutes = d.get("time_limit_minutes", 15)
+    try:
+        minutes = int(raw_minutes)
+    except (ValueError, TypeError):
+        minutes = 15
+    if minutes < 0:
+        minutes = 15
+    if minutes == 0:
+        g["time_limit_minutes"] = None
+        widgets["time_limit"].set("0")
+    else:
+        g["time_limit_minutes"] = minutes
+        widgets["time_limit"].set(str(minutes))
 
     for i, r in enumerate(d.get("rows", [])):
         if i < len(rows):
@@ -315,6 +407,7 @@ def build_ui():
     widgets["dest"] = tk.StringVar()
     widgets["exts"] = tk.StringVar(value="png jpg jpeg webp")
     widgets["template"] = tk.StringVar(value="YMD_NAME_NUM")
+    widgets["time_limit"] = tk.StringVar(value="15")
 
     # Categories
     top = tk.LabelFrame(root, text="Active Sorting Categories", padx=10, pady=10)
@@ -385,6 +478,22 @@ def build_ui():
     tk.Button(subframe, text="Save Settings", command=save_settings).grid(row=0, column=0, sticky="w")
     tk.Button(subframe, text="Load Settings", command=load_settings).grid(row=0, column=1, sticky="w")
 
+    time_limit_row = tk.Frame(ctl)
+    time_limit_row.grid(row=3, column=0, columnspan=6, sticky="w", padx=10, pady=(8, 0))
+
+    tk.Button(time_limit_row, text="set time limit:", command=handle_set_time_limit).pack(side="left")
+    tk.Entry(time_limit_row, textvariable=widgets["time_limit"], width=5).pack(side="left")
+    tk.Label(time_limit_row, text="minutes").pack(side="left")
+
+    countdown_frame = tk.Frame(time_limit_row)
+    countdown_frame.pack(side="left")
+    tk.Label(countdown_frame, text="Monitoring will stop forcibly in ").pack(side="left")
+    countdown_value = tk.Label(countdown_frame, text="00:00:00", fg="red")
+    countdown_value.pack(side="left")
+    widgets["time_limit_countdown_frame"] = countdown_frame
+    widgets["time_limit_countdown_value"] = countdown_value
+    countdown_frame.pack_forget()
+
     widgets["log"] = scrolledtext.ScrolledText(root, height=10, state="disabled")
     widgets["log"].pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -401,4 +510,5 @@ def main():
     build_ui()
     load_settings()
     poll_loop()
+    countdown_loop()
     widgets["root"].mainloop()
