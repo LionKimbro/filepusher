@@ -113,7 +113,7 @@
   "file_naming": {
     "description": "Determines output filename for transferred files.",
     "rules": [
-      "If naming template is provided, generate filename using date, category name, and counter",
+      "If naming template is provided, generate filename using supported template tokens such as date, category name, counter, and original filename",
       "If no template is provided, use original filename",
       "Resolve name collisions deterministically with suffixes",
       "Do not overwrite existing files"

@@ -281,7 +281,10 @@ def make_output_filename(tag):
         tmpl.replace("YMD", today)
             .replace("NAME", tag)
             .replace("NUM", str(cnt))
+            .replace("ORIGINAL", path.name)
     )
+    if "ORIGINAL" in tmpl:
+        return base
     return base + path.suffix
 
 def resolve_collision(dest, name):
@@ -346,6 +349,7 @@ def save_settings():
         "dest": widgets["dest"].get(),
         "exts": widgets["exts"].get(),
         "template": widgets["template"].get(),
+        "notes": widgets["notes"].get("1.0", "end-1c"),
         "active_category": widgets["radio_category"].get(),
         "transfer_mode": widgets["radio_mode"].get(),
         "time_limit_minutes": 0 if g["time_limit_minutes"] is None else g["time_limit_minutes"],
@@ -368,6 +372,8 @@ def load_settings():
     widgets["template"].set(d.get("template", "YMD_NAME_NUM"))
     widgets["radio_category"].set(d.get("active_category", 0))
     widgets["radio_mode"].set(d.get("transfer_mode", TRANSFER_COPY))
+    widgets["notes"].delete("1.0", "end")
+    widgets["notes"].insert("1.0", d.get("notes", ""))
 
     raw_minutes = d.get("time_limit_minutes", 15)
     try:
@@ -441,6 +447,13 @@ def build_ui():
     mode.grid(row=2, column=1, sticky="w")
     tk.Radiobutton(mode, text="Copy", variable=widgets["radio_mode"], value=TRANSFER_COPY).pack(side="left")
     tk.Radiobutton(mode, text="Move", variable=widgets["radio_mode"], value=TRANSFER_MOVE).pack(side="left")
+    tk.Label(
+        cfg,
+        text="substitutions: YMD (yyyy-mm-dd), NAME (tag name), NUM (count), ORIGINAL (original incl extension); '*' is a valid extension",
+        anchor="w",
+        justify="left",
+        wraplength=520,
+    ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
     # Sources
     srcs = tk.LabelFrame(root, text="Source Folders", padx=10, pady=10)
